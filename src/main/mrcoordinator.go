@@ -9,12 +9,17 @@ package main
 // Please do not change this file.
 //
 
-import "6.5840/mr"
-import "time"
-import "os"
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"time"
+
+	"6.5840/mr"
+)
 
 func main() {
+	fmt.Printf("Starting mr coordinator with args %v\n", os.Args[1:])
+
 	if len(os.Args) < 3 {
 		fmt.Fprintf(os.Stderr, "Usage: mrcoordinator sockname inputfiles...\n")
 		os.Exit(1)
