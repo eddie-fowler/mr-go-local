@@ -4,6 +4,10 @@ Goal – Implement a local MapReduce program
 
 Time constraint – 1 week starting 08/06/2026
 
+Commands 
+    - start coordinator [$main go run mrcoordinator.go sock123 pg-*.txt]
+    - start worker [$main go run mrworker.go {plugin_filename}.so sock123]
+
 Modules 
     - Coordinator 
       - Allocate map/reduce workers 
@@ -41,10 +45,19 @@ General Notes
     - worker.go
       - Need a way to signal status to Coordinator 
       - Do they need to house both map/reduce functions?
+      - Asks for tasks from coordinator until none remain
     - net package
       - listen creates servers 
       - dial connects to servers 
       - rpc
         - provide network access to exported methods of an object 
         - 
-
+    - whole idea is that MapReduce is distributed across "commodity" machines and communicates via network protocols 
+      - coordinator and workers will be servers that RPC back and forth 
+      - workers ask coordinator for work 
+      - execute mapf then reducef -> report back to coordinator 
+    - todo
+      - write to temp files 
+      - handle resource locks
+      - handle retries 
+      - handle worker heartbeat 

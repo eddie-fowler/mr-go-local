@@ -21,3 +21,27 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type RequestTaskArgs struct {
+	WorkerId int
+}
+
+type RequestTaskReply struct {
+	Filename string
+}
+
+type UpdateWorkerStatusArgs struct {
+	WorkerId int
+	Status string
+}
+
+type UpdateWorkerStatusReply struct {
+}
+
+type UpdateTaskStatusArgs struct {
+	TaskID string
+	Status string
+	AssignedWorkerId int
+}
+
+type UpdateTaskStatusReply struct {
+}
