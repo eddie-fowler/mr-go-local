@@ -57,7 +57,11 @@ General Notes
       - workers ask coordinator for work 
       - execute mapf then reducef -> report back to coordinator 
     - todo
-      - write to temp files 
+      - write to temp files x 
+      - split map and reduce to seprate workers x 
+      - allocate task workers by entry params x
       - handle resource locks
+        - Use mutex to prevent concurrent updates to coordinator state 
       - handle retries 
       - handle worker heartbeat 
+      - handle skip threshold

@@ -7,8 +7,10 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"path/filepath"
 	"sort"
-	"time"
+	"strconv"
+	"strings"
 )
 
 // Map functions return a slice of KeyValue.
@@ -48,54 +50,21 @@ func Worker(sockname string, mapf func(string, string) []KeyValue, reducef func(
 	var reply *RequestTaskReply
 	var ce error
 	for reply, ce = CallRequestTask(); reply.Filename != "" && ce == nil; reply, ce = CallRequestTask() {
-		fmt.Printf("filename reply: %v \n", reply.Filename)
+		fmt.Printf("WorkerId: %v | Begin processing task: %v of type: %v reduceCount: %v\n", workerId, reply.Filename, reply.TaskType, reply.ReduceCount)
 
-		//get contents of file
-		file, err := os.Open(reply.Filename)
-		if err != nil {
-			signalError(workerId, reply.Filename)
-			log.Fatalf("cannot open %v", reply.Filename)
-		}
-		contents, err := ioutil.ReadAll(file)
-		if err != nil {
-			signalError(workerId, reply.Filename)
-			log.Fatalf("cannot read %v", reply.Filename)
-		}
-		file.Close()
-
-		//call mapf with filename and contents
-		var kvs []KeyValue
-		kvs = mapf(reply.Filename, string(contents))
-		// fmt.Printf("kvs: %v \n", kvs)
-
-		//call reducef with results from mapf
-		intermediate := []KeyValue{}
-		intermediate = append(intermediate, kvs...)
-		sort.Sort(ByKey(intermediate))
-
-		i := 0
-		for i < len(intermediate) {
-			j := i + 1
-			for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-				j++
-			}
-			values := []string{}
-			for k := i; k < j; k++ {
-				values = append(values, intermediate[k].Value)
-			}
-			// output := reducef(intermediate[i].Key, values)
-			// fmt.Printf("%v %v \n", intermediate[i].Key, output)
-
-			i = j
+		if reply.TaskType == "map" {
+			executeMapf(reply.Filename, mapf)
+		} else {
+			executeReducef(reply.Filename, reducef, reply.ReduceCount)
 		}
 
 		CallUpdateTaskStatus(reply.Filename, "completed", workerId)
-		time.Sleep(time.Second * 2)
+		// time.Sleep(time.Second * 2)
 	}
 
 	if ce != nil {
 		signalError(workerId, reply.Filename)
-		log.Fatal(ce)
+		// log.Fatal(ce)
 	}
 }
 
@@ -133,7 +102,8 @@ func CallRequestTask() (*RequestTaskReply, error) {
 	reply := RequestTaskReply{}
 
 	ok := call("Coordinator.RequestTask", &args, &reply)
-	skip := (reply.Filename == "pg-being_ernest.txt" && workerId % 2 == 0) //simulate worker failure for testing
+	// skip := (reply.Filename == "pg-being_ernest.txt" && workerId % 2 == 0) //simulate worker failure for testing
+	skip := false
 	if ok && !skip {
 		return &reply, nil
 	} else {
@@ -187,4 +157,97 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 func signalError(assignedWorkerId int, taskID string) {
 	CallUpdateWorkerStatus(assignedWorkerId, "dead")
 	CallUpdateTaskStatus(taskID, "not completed", assignedWorkerId)
+}
+
+func executeMapf(filename string, mapf func(string, string) []KeyValue) {
+		file, err := os.Open(filename)
+		if err != nil {
+			signalError(workerId, filename)
+			log.Fatalf("cannot open %v", filename)
+		}
+		contents, err := ioutil.ReadAll(file)
+		if err != nil {
+			signalError(workerId, filename)
+			log.Fatalf("cannot read %v", filename)
+		}
+		file.Close()
+
+		var kvs []KeyValue
+		kvs = mapf(filename, string(contents))
+
+		fileNameOnly := getFileNameOnly(filename)
+		oname := "tmp-map-" + fmt.Sprint(fileNameOnly)
+		ofile, _ := os.Create(oname)
+
+		for _, kv := range kvs {
+			fmt.Fprintf(ofile, "%v %v\n", kv.Key, kv.Value)
+		}
+
+		ofile.Close()
+}
+
+func executeReducef(filename string, reducef func(string, []string) string, nReduceCount int) string {
+	fmt.Printf("reduce count for reducef %v \n", nReduceCount)
+	fileNameOnly := getFileNameOnly(filename)
+	data, err := os.ReadFile("tmp-map-"+fileNameOnly)
+	if err != nil {
+		signalError(workerId, filename)
+		log.Fatalf("cannot read %v", "tmp-map-"+fileNameOnly)
+	}
+
+	text := strings.TrimSuffix(string(data), "\n")
+	lines := strings.Split(text, "\n")
+	intermediate := make([]KeyValue, len(lines))
+	
+	for i, l := range lines {
+		intermediate[i] = toKeyValue(l)
+	}
+
+	sort.Sort(ByKey(intermediate))
+
+	oname := "mr-out-"+ strconv.Itoa(nReduceCount)
+	oname, err = filepath.Abs(oname)
+	if err != nil {
+		signalError(workerId, filename)
+		log.Fatalf("cannot resolve absolute path for %v", oname)
+	}
+	ofile, _ := os.Create(oname)
+
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+
+		for j < len(intermediate) && intermediate[i].Key == intermediate[j].Key {
+			j++
+		}
+
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+
+		output := reducef(intermediate[i].Key, values)
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+
+	ofile.Close()
+
+	return oname
+}
+
+func getFileNameOnly(filename string) string {
+	fileNameParts := strings.Split(filename, "/")
+	fileName := fileNameParts[len(fileNameParts)-1]
+	return fileName[:len(fileName)-4]
+}
+
+func toKeyValue(line string) KeyValue {
+	tmp := strings.Split(line, " ")
+	kv := KeyValue{}
+	kv.Key = tmp[0]
+	kv.Value = tmp[1]
+
+	return kv
 }

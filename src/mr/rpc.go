@@ -26,7 +26,9 @@ type RequestTaskArgs struct {
 }
 
 type RequestTaskReply struct {
+	TaskType string
 	Filename string
+	ReduceCount int
 }
 
 type UpdateWorkerStatusArgs struct {

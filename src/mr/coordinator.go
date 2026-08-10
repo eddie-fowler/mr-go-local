@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"path/filepath"
+	"sync"
 )
 
 /*
@@ -16,17 +18,23 @@ import (
 	3. Keep track of which workers are alive and which are dead
 	4. Reassign tasks to workers if a worker dies before completing the task
 */
+
 type Coordinator struct {
-	// Your definitions here.
-	tasks 	map[string]Task //map of taskId to task
-	workers map[int]bool //map of workerId to worker status (alive or dead)
+	tasks 	map[string][]Task
+	isMapDone bool 
+	workers map[int]bool
+	nReduceCount int
+	mu sync.Mutex
 }
 
 type Task struct {
 	taskID string //filename
+	taskType string //map or reduce
 	taskStatus string //not started, in progress, completed, skipped
 	assignedWorkerId int //index of worker assigned to task
 }
+
+var inputFilesCount int
 
 // Your code here -- RPC handlers for the worker to call.
 
@@ -38,59 +46,104 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 }
 
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
-	fmt.Printf("Task request from worker \n")
+	c.mu.Lock()
 
-	nextTask := Task{}
-	for _, task := range c.tasks {
-		if task.taskStatus == "not started" {
-			nextTask = task
-			break
+	fmt.Printf("Task request from worker %v \n", args.WorkerId)
+
+	var nextTask *Task
+	for key := range c.tasks {
+		tasks := c.tasks[key]
+		for i := range tasks {
+			t := tasks[i]
+			if (!c.isMapDone && t.taskType == "map" && t.taskStatus == "not started") ||
+				(c.isMapDone && t.taskType == "reduce" && t.taskStatus == "not started") {
+				nextTask = &tasks[i]
+			}
 		}
 	}
-	nextTask.assignedWorkerId = args.WorkerId
-	nextTask.taskStatus = "in progress"
 
-	fmt.Printf("Allocating task: %v to worker: %v \n", nextTask.taskID, nextTask.assignedWorkerId)
+	if nextTask != nil {
+		nextTask.assignedWorkerId = args.WorkerId
+		nextTask.taskStatus = "in progress"
+	
+		fmt.Printf("Allocating task: %v type: %v to worker: %v \n", nextTask.taskID, nextTask.taskType, nextTask.assignedWorkerId)
 
-	reply.Filename = nextTask.taskID
+		reply.Filename = nextTask.taskID
+		reply.TaskType = nextTask.taskType
+		if(nextTask.taskType == "reduce"){
+			reply.ReduceCount = c.nReduceCount
+		}
+	}
 
+	c.mu.Unlock()
 	return nil
 }
 
 func (c *Coordinator) UpdateWorkerStatus(args *UpdateWorkerStatusArgs, reply *UpdateWorkerStatusReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.workers[args.WorkerId] = (args.Status == "alive")
 
 	return nil
 }
 
 func (c *Coordinator) UpdateTaskStatus(args *UpdateTaskStatusArgs, reply *UpdateTaskStatusReply) error {
-	c.tasks[args.TaskID] = Task{taskID: args.TaskID, taskStatus: args.Status, assignedWorkerId: args.AssignedWorkerId}
+	c.mu.Lock() 
+	defer c.mu.Unlock()
+
+	task := c.tasks[args.TaskID]
+
+	for i := range task {
+		if task[i].assignedWorkerId == args.AssignedWorkerId {
+			fmt.Printf("WorkerId: %v updating task: %v type: %v status: %v \n", args.AssignedWorkerId, args.TaskID, task[i].taskType, args.Status)
+			task[i].taskStatus = args.Status
+
+			if task[i].taskStatus == "completed" && task[i].taskType == "map" {
+				task[i].assignedWorkerId = -1
+				c.checkIfAllMapsDone()
+				break
+			} else if task[i].taskStatus == "completed" && task[i].taskType == "reduce" {
+				c.nReduceCount -= 1
+			}
+
+		}
+	}
 
 	return nil
 }
 
-// main/mrcoordinator.go calls Done() periodically to find out
-// if the entire job has finished.
+
+//This is called on loop by coordinator setups break dependency on struct state to avoid race conditions
 func (c *Coordinator) Done() bool {
-	for _, task := range c.tasks {
-		if task.taskStatus != "completed" && task.taskStatus != "skipped" {
-			return false
-		}
+	outputFiles, err := filepath.Glob("mr-out-*")
+	if err != nil {
+		log.Fatalf("error globbing mr-out-* files: %v", err)
 	}
 
-	return true
+	fmt.Printf("output:%v input:%v \n", len(outputFiles), inputFilesCount)
+
+	return len(outputFiles) == inputFilesCount
 }
 
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator {
+	cleanUpOutput()
+
 	c := Coordinator{}
-	c.tasks = make(map[string]Task)
+	c.nReduceCount = nReduce
+	fmt.Printf("start nReduce with %v \n", nReduce)
+	c.tasks = make(map[string][]Task)
+	inputFilesCount = len(files)
 	for _, filename := range files {
-		c.tasks[filename] = Task{taskID: filename, taskStatus: "not started", assignedWorkerId: -1}
+		c.tasks[filename] = make([]Task, 2)
+		c.tasks[filename][0] = Task{taskID: filename, taskType: "map", taskStatus: "not started", assignedWorkerId: -1}
+		c.tasks[filename][1] = Task{taskID: filename, taskType: "reduce", taskStatus: "not started", assignedWorkerId: -1}
 	}
 	c.workers = make(map[int]bool)
+	fmt.Printf("Tasks ready %v \n", c.tasks)
 
 	c.server(sockname)
 	return &c
@@ -106,4 +159,29 @@ func (c *Coordinator) server(sockname string) {
 		log.Fatalf("listen error %s: %v", sockname, e)
 	}
 	go http.Serve(l, nil)
+}
+
+func (c *Coordinator) checkIfAllMapsDone() {
+	for _, task := range c.tasks {
+		for _, t := range task {
+			if t.taskType == "map" && t.taskStatus != "completed" {
+				c.isMapDone = false
+				return
+			}
+		}
+	}
+	c.isMapDone = true
+}
+
+func cleanUpOutput() {
+	outputFiles, err := filepath.Glob("mr-out-*")
+	if err != nil {
+		log.Fatalf("error globbing mr-out-* files: %v", err)
+	}
+
+	for _, f := range outputFiles {
+		if err := os.Remove(f); err != nil {
+			log.Fatalf("error removing %v: %v", f, err)
+		}
+	}
 }
