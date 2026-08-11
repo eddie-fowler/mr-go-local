@@ -10,24 +10,30 @@ Commands
 
 Modules 
     - Coordinator 
-      - Allocate map/reduce workers 
+      - Create map tasks 
       - Monitor process health 
-      - Retry processes 
-      - Reallocate map/reduce workers 
-      - Read/Write files 
-    - Map Worker 
-      - func (k, a -> b)
-      - divide the intermediate keys into nReduce taks 
-      - Workers connect to the Coordinator 
-    - Reduce Worker
-      - func (k, iterator values)
-      - outputs to mr-out-X (X being the Xth reduced task)
-    - Input Partition 
-    - Output Merge
+      - Retry tasks 
+      - Store intermediate results to shared memory 
+      - merge all intermediate results 
+      - partition intermediate results according to number of reducers 
+      - create reduce tasks based on reducer count
+    - Worker 
+      - Map
+        - transform (k1, v1) -> list(k1 v1) 
+        - store intermediate results in local storage 
+        - emit intermediate results to coordinator 
+      -  Reduce 
+         - reduce (k1, list(v2)) -> list(v2)
+         - store output results in local storage 
+         - emit to coordinator 
     - RPC
-      - net/rpc package candidate
-      - new goroutine is created per connection
-
+      - RequestTask
+      - UpdateTask
+    - State Management 
+      - IntermediateResults
+      - ReducerCount
+      - Tasks {id, type, status, assignedWorkerId, contentLocation, retries, createdAt }
+      - Actions [Request, Update,]
 
 General Notes
     - mrsequential.go

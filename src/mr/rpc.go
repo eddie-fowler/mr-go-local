@@ -1,34 +1,10 @@
 package mr
-
-//
-// RPC definitions.
-//
-// remember to capitalize all names.
-//
-
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
-
-type ExampleArgs struct {
-	X int
-}
-
-type ExampleReply struct {
-	Y int
-}
-
-// Add your RPC definitions here.
-
 type RequestTaskArgs struct {
 	WorkerId int
 }
 
 type RequestTaskReply struct {
-	TaskType string
-	Filename string
-	ReduceCount int
+	Task				Task
 }
 
 type UpdateWorkerStatusArgs struct {
@@ -40,9 +16,11 @@ type UpdateWorkerStatusReply struct {
 }
 
 type UpdateTaskStatusArgs struct {
-	TaskID string
-	Status string
-	AssignedWorkerId int
+	TaskId				string
+	AssignedWorkerId	int
+	WriteLocation	 	string
+	Status				string
+	Intermediate		[]KeyValue
 }
 
 type UpdateTaskStatusReply struct {

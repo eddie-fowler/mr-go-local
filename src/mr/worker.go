@@ -7,10 +7,11 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -34,64 +35,43 @@ func ihash(key string) int {
 
 var coordSockName string // socket for coordinator
 var workerId int // unique worker id for each worker
+var workerInitDir string // directory the worker command was run from
 
 // main/mrworker.go calls this function.
-/*
-	1. ask for work from the coordinator until no more work is available
-	2. (map) with RequestTask response from coordinator execute mapf with filename and contents 
-	3. (reduce) with results from mapf execute reducef
-	4. send results back to coordinator
-*/
 func Worker(sockname string, mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	coordSockName = sockname
 	workerId = os.Getpid()
 	fmt.Printf("Worker %v started \n", workerId)
 
+	if wd, err := os.Getwd(); err == nil {
+		workerInitDir = wd
+	} else {
+		log.Printf("cannot determine worker init dir: %v", err)
+	}
+
 	var reply *RequestTaskReply
 	var ce error
-	for reply, ce = CallRequestTask(); reply.Filename != "" && ce == nil; reply, ce = CallRequestTask() {
-		fmt.Printf("WorkerId: %v | Begin processing task: %v of type: %v reduceCount: %v\n", workerId, reply.Filename, reply.TaskType, reply.ReduceCount)
+	for reply, ce = CallRequestTask(); reply.Task.ReadLocation != "" && ce == nil; reply, ce = CallRequestTask() {
+		fmt.Printf("WorkerId: %v | Begin processing task: %v of type: %v \n", workerId, reply.Task.ReadLocation, reply.Task.Type)
 
-		if reply.TaskType == "map" {
-			executeMapf(reply.Filename, mapf)
+		intermediate := make([]KeyValue, 0)
+		var err error
+		if reply.Task.Type == "map" {
+			err = executeMapf(reply.Task.ReadLocation, reply.Task.WriteLocation, &intermediate, mapf)
 		} else {
-			executeReducef(reply.Filename, reducef, reply.ReduceCount)
+			err = executeReducef(reply.Task.ReadLocation, reply.Task.WriteLocation, reducef)
 		}
 
-		CallUpdateTaskStatus(reply.Filename, "completed", workerId)
-		// time.Sleep(time.Second * 2)
+		if err != nil {
+			CallUpdateTaskStatus(reply.Task.Id, "not started", reply.Task.WriteLocation, -1, intermediate)
+		} else {
+			CallUpdateTaskStatus(reply.Task.Id, "completed", reply.Task.WriteLocation, reply.Task.AssignedWorkerId, intermediate)
+			time.Sleep(time.Second * 2)
+		}
 	}
 
 	if ce != nil {
-		signalError(workerId, reply.Filename)
-		// log.Fatal(ce)
-	}
-}
-
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func CallExample() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
-	} else {
-		fmt.Printf("call failed!\n")
+		log.Fatal(ce)
 	}
 }
 
@@ -111,8 +91,8 @@ func CallRequestTask() (*RequestTaskReply, error) {
 	}
 }
 
-func CallUpdateTaskStatus(taskID string, status string, assignedWorkerId int) error {
-	args := UpdateTaskStatusArgs{TaskID: taskID, Status: status, AssignedWorkerId: assignedWorkerId}
+func CallUpdateTaskStatus(taskID string, status string, writeLocation string, assignedWorkerId int, intermediate []KeyValue) error {
+	args := UpdateTaskStatusArgs{TaskId: taskID, Status: status, WriteLocation: writeLocation, AssignedWorkerId: assignedWorkerId, Intermediate: intermediate}
 	reply := UpdateTaskStatusReply{}
 
 	ok := call("Coordinator.UpdateTaskStatus", &args, &reply)
@@ -154,45 +134,46 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 }
 
 
-func signalError(assignedWorkerId int, taskID string) {
-	CallUpdateWorkerStatus(assignedWorkerId, "dead")
-	CallUpdateTaskStatus(taskID, "not completed", assignedWorkerId)
+func signalError(task Task) {
+	// CallUpdateWorkerStatus(task.AssignedWorkerId, "dead")
+	// CallUpdateTaskStatus(task.Id, "not completed", task.WriteLocation, task.AssignedWorkerId, nil)
 }
 
-func executeMapf(filename string, mapf func(string, string) []KeyValue) {
-		file, err := os.Open(filename)
+
+//Read from location 
+//Write to location 
+//Store results in intermediate [Will sort intermediate when all maps done then partition by ReducerCount]
+//Update task status 
+func executeMapf(readLocation string, writeLocation string, intermediate *[]KeyValue, mapf func(string, string) []KeyValue) error {
+		file, err := os.Open(readLocation)
 		if err != nil {
-			signalError(workerId, filename)
-			log.Fatalf("cannot open %v", filename)
+			log.Printf("cannot open %v", readLocation)
+			return err
 		}
 		contents, err := ioutil.ReadAll(file)
 		if err != nil {
-			signalError(workerId, filename)
-			log.Fatalf("cannot read %v", filename)
+			log.Printf("cannot read %v", readLocation)
+			return err
 		}
 		file.Close()
 
 		var kvs []KeyValue
-		kvs = mapf(filename, string(contents))
+		kvs = mapf(readLocation, string(contents))
 
-		fileNameOnly := getFileNameOnly(filename)
-		oname := "tmp-map-" + fmt.Sprint(fileNameOnly)
-		ofile, _ := os.Create(oname)
+		*intermediate = append(*intermediate, kvs...)
 
-		for _, kv := range kvs {
-			fmt.Fprintf(ofile, "%v %v\n", kv.Key, kv.Value)
-		}
+		fileNameOnly := getFileNameOnly(writeLocation)
+		writeToLocation(fileNameOnly, writeLocation, kvs)
+		writeToWorkerInitDir(writeLocation, kvs)
 
-		ofile.Close()
+		return nil
 }
 
-func executeReducef(filename string, reducef func(string, []string) string, nReduceCount int) string {
-	fmt.Printf("reduce count for reducef %v \n", nReduceCount)
-	fileNameOnly := getFileNameOnly(filename)
-	data, err := os.ReadFile("tmp-map-"+fileNameOnly)
+func executeReducef(readLocation string, writeLocation string, reducef func(string, []string) string) error {
+	data, err := os.ReadFile(readLocation)
 	if err != nil {
-		signalError(workerId, filename)
-		log.Fatalf("cannot read %v", "tmp-map-"+fileNameOnly)
+		log.Printf("cannot read %v", readLocation)
+		return  err
 	}
 
 	text := strings.TrimSuffix(string(data), "\n")
@@ -205,14 +186,7 @@ func executeReducef(filename string, reducef func(string, []string) string, nRed
 
 	sort.Sort(ByKey(intermediate))
 
-	oname := "mr-out-"+ strconv.Itoa(nReduceCount)
-	oname, err = filepath.Abs(oname)
-	if err != nil {
-		signalError(workerId, filename)
-		log.Fatalf("cannot resolve absolute path for %v", oname)
-	}
-	ofile, _ := os.Create(oname)
-
+	ofile, _ := os.Create(writeLocation)
 	i := 0
 	for i < len(intermediate) {
 		j := i + 1
@@ -231,10 +205,54 @@ func executeReducef(filename string, reducef func(string, []string) string, nRed
 
 		i = j
 	}
-
 	ofile.Close()
+	copyToWorkerInitDir(writeLocation)
 
-	return oname
+	return nil
+}
+
+func writeToWorkerInitDir(writeLocation string, kvs []KeyValue) {
+	if workerInitDir == "" {
+		return
+	}
+
+	baseFileName := filepath.Base(writeLocation)
+	if filepath.Clean(workerInitDir) == filepath.Clean(filepath.Dir(writeLocation)) {
+		return
+	}
+
+	writeToLocation(baseFileName, workerInitDir, kvs)
+}
+
+func copyToWorkerInitDir(writeLocation string) {
+	if workerInitDir == "" {
+		return
+	}
+
+	if filepath.Clean(workerInitDir) == filepath.Clean(filepath.Dir(writeLocation)) {
+		return
+	}
+
+	data, err := os.ReadFile(writeLocation)
+	if err != nil {
+		log.Printf("cannot read %v to duplicate into worker init dir: %v", writeLocation, err)
+		return
+	}
+
+	dupPath := filepath.Join(workerInitDir, filepath.Base(writeLocation))
+	if err := os.WriteFile(dupPath, data, 0644); err != nil {
+		log.Printf("cannot write duplicate %v: %v", dupPath, err)
+	}
+}
+
+func writeToLocation(fileName string, writeLocation string, kvs []KeyValue){
+		ofile, _ := os.Create(path.Join(writeLocation, fileName))
+
+		for _, kv := range kvs {
+			fmt.Fprintf(ofile, "%v %v\n", kv.Key, kv.Value)
+		}
+
+		ofile.Close()
 }
 
 func getFileNameOnly(filename string) string {

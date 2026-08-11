@@ -8,142 +8,103 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"sync"
+	"time"
 )
 
-/*
-	Coordinator's responsibility is to
-	1. Give tasks to workers upon request
-	2. Keep track of which tasks are completed and which are not
-	3. Keep track of which workers are alive and which are dead
-	4. Reassign tasks to workers if a worker dies before completing the task
-*/
-
 type Coordinator struct {
-	tasks 	map[string][]Task
-	isMapDone bool 
-	workers map[int]bool
-	nReduceCount int
-	mu sync.Mutex
+	MainDir				string
+	IntermediateResults []KeyValue
+	ReducerCount		int
+	Tasks				[]Task
+	IsReduceGenerated	bool
+	Mutex				sync.Mutex
 }
 
 type Task struct {
-	taskID string //filename
-	taskType string //map or reduce
-	taskStatus string //not started, in progress, completed, skipped
-	assignedWorkerId int //index of worker assigned to task
-}
-
-var inputFilesCount int
-
-// Your code here -- RPC handlers for the worker to call.
-
-// an example RPC handler.
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
+	Id 					string
+	Type				string //map, reduce
+	Status				string //not started, in progress, completed, skipped 
+	AssignedWorkerId	int
+	ReadLocation		string
+	WriteLocation		string
+	Retries				int
+	LastUpdated			time.Time
 }
 
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
-	c.mu.Lock()
+	c.Mutex.Lock()
+	defer c.Mutex.Unlock()
 
-	fmt.Printf("Task request from worker %v \n", args.WorkerId)
-
-	var nextTask *Task
-	for key := range c.tasks {
-		tasks := c.tasks[key]
-		for i := range tasks {
-			t := tasks[i]
-			if (!c.isMapDone && t.taskType == "map" && t.taskStatus == "not started") ||
-				(c.isMapDone && t.taskType == "reduce" && t.taskStatus == "not started") {
-				nextTask = &tasks[i]
-			}
+	taskIndex := -1
+	for i, t := range c.Tasks {
+		if t.Status == "not started" && t.AssignedWorkerId == -1 {
+			taskIndex = i
+			break
 		}
 	}
 
-	if nextTask != nil {
-		nextTask.assignedWorkerId = args.WorkerId
-		nextTask.taskStatus = "in progress"
-	
-		fmt.Printf("Allocating task: %v type: %v to worker: %v \n", nextTask.taskID, nextTask.taskType, nextTask.assignedWorkerId)
-
-		reply.Filename = nextTask.taskID
-		reply.TaskType = nextTask.taskType
-		if(nextTask.taskType == "reduce"){
-			reply.ReduceCount = c.nReduceCount
-		}
+	if taskIndex == -1 {
+		reply.Task = Task{}
+		return nil
 	}
 
-	c.mu.Unlock()
-	return nil
-}
+	c.Tasks[taskIndex].Status = "in progress"
+	c.Tasks[taskIndex].AssignedWorkerId = args.WorkerId
+	c.Tasks[taskIndex].LastUpdated = time.Now()
 
-func (c *Coordinator) UpdateWorkerStatus(args *UpdateWorkerStatusArgs, reply *UpdateWorkerStatusReply) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.workers[args.WorkerId] = (args.Status == "alive")
+	reply.Task = c.Tasks[taskIndex]
 
 	return nil
 }
 
 func (c *Coordinator) UpdateTaskStatus(args *UpdateTaskStatusArgs, reply *UpdateTaskStatusReply) error {
-	c.mu.Lock() 
-	defer c.mu.Unlock()
+	c.Mutex.Lock()
+	defer c.Mutex.Unlock()
 
-	task := c.tasks[args.TaskID]
+	for i, t := range c.Tasks {
+		if (t.Id == args.TaskId){
+			c.IntermediateResults = append(c.IntermediateResults, args.Intermediate...)
 
-	for i := range task {
-		if task[i].assignedWorkerId == args.AssignedWorkerId {
-			fmt.Printf("WorkerId: %v updating task: %v type: %v status: %v \n", args.AssignedWorkerId, args.TaskID, task[i].taskType, args.Status)
-			task[i].taskStatus = args.Status
-
-			if task[i].taskStatus == "completed" && task[i].taskType == "map" {
-				task[i].assignedWorkerId = -1
-				c.checkIfAllMapsDone()
-				break
-			} else if task[i].taskStatus == "completed" && task[i].taskType == "reduce" {
-				c.nReduceCount -= 1
-			}
-
+			c.Tasks[i].Status = args.Status
+			c.Tasks[i].WriteLocation = args.WriteLocation
+			c.Tasks[i].LastUpdated = time.Now()
+			break
 		}
 	}
 
+	generateReduceTasksIfApplicable(c)
+	
 	return nil
 }
 
 
 //This is called on loop by coordinator setups break dependency on struct state to avoid race conditions
 func (c *Coordinator) Done() bool {
-	outputFiles, err := filepath.Glob("mr-out-*")
-	if err != nil {
-		log.Fatalf("error globbing mr-out-* files: %v", err)
+	c.Mutex.Lock()
+	defer c.Mutex.Unlock()
+
+	for _, t := range c.Tasks {
+		if t.Status != "completed"{
+			return false
+		}
 	}
-
-	fmt.Printf("output:%v input:%v \n", len(outputFiles), inputFilesCount)
-
-	return len(outputFiles) == inputFilesCount
+	return true
 }
 
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator {
-	cleanUpOutput()
-
 	c := Coordinator{}
-	c.nReduceCount = nReduce
-	fmt.Printf("start nReduce with %v \n", nReduce)
-	c.tasks = make(map[string][]Task)
-	inputFilesCount = len(files)
-	for _, filename := range files {
-		c.tasks[filename] = make([]Task, 2)
-		c.tasks[filename][0] = Task{taskID: filename, taskType: "map", taskStatus: "not started", assignedWorkerId: -1}
-		c.tasks[filename][1] = Task{taskID: filename, taskType: "reduce", taskStatus: "not started", assignedWorkerId: -1}
-	}
-	c.workers = make(map[int]bool)
-	fmt.Printf("Tasks ready %v \n", c.tasks)
+	setMainDir(&c)
+
+	cleanUp(&c)
+	initializeMapTasks(&c, files)
+	initializeCoordinator(&c, nReduce)
+	fmt.Printf("tasks %v \n", c.Tasks)
 
 	c.server(sockname)
 	return &c
@@ -161,27 +122,109 @@ func (c *Coordinator) server(sockname string) {
 	go http.Serve(l, nil)
 }
 
-func (c *Coordinator) checkIfAllMapsDone() {
-	for _, task := range c.tasks {
-		for _, t := range task {
-			if t.taskType == "map" && t.taskStatus != "completed" {
-				c.isMapDone = false
-				return
-			}
-		}
+func setMainDir(coordinator *Coordinator){
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		log.Fatalf("Couldn't find source file")
 	}
-	c.isMapDone = true
+
+	dir := filepath.Dir(sourceFile)
+	dir = filepath.Join(dir, "../main")
+
+	coordinator.MainDir = dir
+	fmt.Printf("main dir %v \n", coordinator.MainDir)
 }
 
-func cleanUpOutput() {
-	outputFiles, err := filepath.Glob("mr-out-*")
-	if err != nil {
-		log.Fatalf("error globbing mr-out-* files: %v", err)
+func initializeMapTasks(coordinator *Coordinator, files []string){
+	coordinator.Tasks = make([]Task, 0)
+	for i, f := range files {
+		fileNameOnly := filepath.Base(f)
+		t := Task{Id: fmt.Sprintf("%v", i), Type: "map", Status: "not started", AssignedWorkerId: -1, ReadLocation: filepath.Join(coordinator.MainDir, fileNameOnly), WriteLocation: filepath.Join(coordinator.MainDir, fmt.Sprintf("mr-%v", i)), Retries: 0, LastUpdated: time.Now()}
+		coordinator.Tasks = append(coordinator.Tasks, t)
+	}
+}
+
+func initializeReduceTasks(coordinator *Coordinator, partitions map[int][]KeyValue){
+	for p := range partitions {
+		readLocation := store(coordinator, p, partitions[p])
+		coordinator.Tasks = append(coordinator.Tasks, Task{Id: 
+			fmt.Sprintf("p-%v", p), 
+			Type: "reduce", 
+			Status: "not started", 
+			AssignedWorkerId: -1, 
+			ReadLocation: readLocation, 
+			WriteLocation: filepath.Join(coordinator.MainDir, fmt.Sprintf("mr-out-%v", p)),
+			Retries: 0,
+			LastUpdated: time.Now()})
+	}
+}
+
+func initializeCoordinator(coordinator *Coordinator, reducerCount int){
+	coordinator.IsReduceGenerated = false
+	coordinator.IntermediateResults = make([]KeyValue, 0)
+	coordinator.ReducerCount = reducerCount
+}
+
+func generateReduceTasksIfApplicable(coordinator *Coordinator) {
+	if !coordinator.IsReduceGenerated {
+		isAllMappingDone := true 
+		for _, t := range coordinator.Tasks {
+			if t.Type == "map" && t.Status != "completed" {
+				isAllMappingDone = false
+				break
+			}
+		}
+		if isAllMappingDone {
+			coordinator.IsReduceGenerated = true
+			
+			partitions := shuffle(coordinator)
+			fmt.Printf("partitions %v \n", len(partitions))
+			initializeReduceTasks(coordinator, partitions)
+			clear(coordinator.IntermediateResults)
+		}
+	}
+}
+
+func shuffle(coordinator *Coordinator) map[int][]KeyValue {
+	sort.Sort(ByKey(coordinator.IntermediateResults))
+
+	partitions := make(map[int][]KeyValue)
+	for _, kv := range coordinator.IntermediateResults {
+		partition := ihash(kv.Key) % coordinator.ReducerCount
+		if partitions[partition] == nil {
+			partitions[partition] = make([]KeyValue, 0)
+			partitions[partition] = append(partitions[partition], kv)
+		} else {
+			partitions[partition] = append(partitions[partition], kv)
+		}
 	}
 
-	for _, f := range outputFiles {
-		if err := os.Remove(f); err != nil {
-			log.Fatalf("error removing %v: %v", f, err)
+	return partitions
+}
+
+func store(coordinator *Coordinator, i int, partition []KeyValue) string {
+	writeLocation := filepath.Join(coordinator.MainDir, fmt.Sprintf("p-%v", i))
+	pfile, _ := os.Create(writeLocation)
+
+	for _, kv := range partition {
+		fmt.Fprintf(pfile, "%v %v\n", kv.Key, kv.Value)
+	}
+
+	pfile.Close()
+
+	return writeLocation
+}
+
+func cleanUp(coordinator *Coordinator) {
+	patterns := []string{"mr-*", "p-*"}
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(filepath.Join(coordinator.MainDir, pattern))
+		if err != nil {
+			log.Printf("glob %v failed err %v", pattern, err)
+			continue
+		}
+		for _, f := range matches {
+			os.Remove(f)
 		}
 	}
 }
