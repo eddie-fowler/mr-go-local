@@ -21,6 +21,7 @@ type UpdateTaskStatusArgs struct {
 	WriteLocation	 	string
 	Status				string
 	Intermediate		[]KeyValue
+	Retries				int
 }
 
 type UpdateTaskStatusReply struct {

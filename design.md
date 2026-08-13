@@ -66,8 +66,8 @@ General Notes
       - write to temp files x 
       - split map and reduce to seprate workers x 
       - allocate task workers by entry params x
-      - handle resource locks
+      - handle resource locks x
         - Use mutex to prevent concurrent updates to coordinator state 
-      - handle retries 
-      - handle worker heartbeat 
-      - handle skip threshold
+      - handle retries x
+      - handle worker heartbeat x
+      - handle skip threshold x

@@ -70,6 +70,7 @@ func (c *Coordinator) UpdateTaskStatus(args *UpdateTaskStatusArgs, reply *Update
 
 			c.Tasks[i].Status = args.Status
 			c.Tasks[i].WriteLocation = args.WriteLocation
+			c.Tasks[i].Retries = args.Retries
 			c.Tasks[i].LastUpdated = time.Now()
 			break
 		}
@@ -86,11 +87,15 @@ func (c *Coordinator) Done() bool {
 	c.Mutex.Lock()
 	defer c.Mutex.Unlock()
 
-	for _, t := range c.Tasks {
-		if t.Status != "completed"{
+	for i := range c.Tasks {
+		setSkippedIfApplicable(i, c.Tasks)
+		setNotStartedIfApplicable(i, c.Tasks)
+
+		if c.Tasks[i].Status != "completed" && c.Tasks[i].Status != "skipped" {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -138,8 +143,8 @@ func setMainDir(coordinator *Coordinator){
 func initializeMapTasks(coordinator *Coordinator, files []string){
 	coordinator.Tasks = make([]Task, 0)
 	for i, f := range files {
-		fileNameOnly := filepath.Base(f)
-		t := Task{Id: fmt.Sprintf("%v", i), Type: "map", Status: "not started", AssignedWorkerId: -1, ReadLocation: filepath.Join(coordinator.MainDir, fileNameOnly), WriteLocation: filepath.Join(coordinator.MainDir, fmt.Sprintf("mr-%v", i)), Retries: 0, LastUpdated: time.Now()}
+		// fileNameOnly := filepath.Base(f)
+		t := Task{Id: fmt.Sprintf("%v", i), Type: "map", Status: "not started", AssignedWorkerId: -1, ReadLocation: f, WriteLocation: filepath.Join(coordinator.MainDir, fmt.Sprintf("mr-%v", i)), Retries: 0, LastUpdated: time.Now()}
 		coordinator.Tasks = append(coordinator.Tasks, t)
 	}
 }
@@ -226,5 +231,22 @@ func cleanUp(coordinator *Coordinator) {
 		for _, f := range matches {
 			os.Remove(f)
 		}
+	}
+}
+
+func setSkippedIfApplicable(i int, tasks []Task){
+	if tasks[i].Status == "in progress" && tasks[i].Retries > 3 {
+		tasks[i].AssignedWorkerId = -1
+		tasks[i].Status = "skipped"
+		tasks[i].LastUpdated = time.Now()
+	}
+}
+
+func setNotStartedIfApplicable(i int, tasks []Task){
+	if tasks[i].Status == "in progress" && time.Since(tasks[i].LastUpdated).Seconds() > 5 {
+		tasks[i].AssignedWorkerId = -1
+		tasks[i].Status = "not started"
+		tasks[i].Retries += 1
+		tasks[i].LastUpdated = time.Now()
 	}
 }

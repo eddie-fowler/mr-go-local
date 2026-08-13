@@ -63,11 +63,11 @@ func Worker(sockname string, mapf func(string, string) []KeyValue, reducef func(
 		}
 
 		if err != nil {
-			CallUpdateTaskStatus(reply.Task.Id, "not started", reply.Task.WriteLocation, -1, intermediate)
+			CallUpdateTaskStatus(reply.Task.Id, "not started", reply.Task.WriteLocation, -1, intermediate, reply.Task.Retries+1)
 		} else {
-			CallUpdateTaskStatus(reply.Task.Id, "completed", reply.Task.WriteLocation, reply.Task.AssignedWorkerId, intermediate)
-			time.Sleep(time.Second * 2)
+			CallUpdateTaskStatus(reply.Task.Id, "completed", reply.Task.WriteLocation, reply.Task.AssignedWorkerId, intermediate, reply.Task.Retries)
 		}
+		time.Sleep(time.Second * 1)
 	}
 
 	if ce != nil {
@@ -91,8 +91,8 @@ func CallRequestTask() (*RequestTaskReply, error) {
 	}
 }
 
-func CallUpdateTaskStatus(taskID string, status string, writeLocation string, assignedWorkerId int, intermediate []KeyValue) error {
-	args := UpdateTaskStatusArgs{TaskId: taskID, Status: status, WriteLocation: writeLocation, AssignedWorkerId: assignedWorkerId, Intermediate: intermediate}
+func CallUpdateTaskStatus(taskID string, status string, writeLocation string, assignedWorkerId int, intermediate []KeyValue, retries int) error {
+	args := UpdateTaskStatusArgs{TaskId: taskID, Status: status, WriteLocation: writeLocation, AssignedWorkerId: assignedWorkerId, Intermediate: intermediate, Retries: retries}
 	reply := UpdateTaskStatusReply{}
 
 	ok := call("Coordinator.UpdateTaskStatus", &args, &reply)
