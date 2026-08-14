@@ -18,8 +18,6 @@ import (
 )
 
 func main() {
-	fmt.Printf("Starting mr coordinator with args %v\n", os.Args[1:])
-
 	if len(os.Args) < 3 {
 		fmt.Fprintf(os.Stderr, "Usage: mrcoordinator sockname inputfiles...\n")
 		os.Exit(1)

@@ -41,7 +41,7 @@ var workerInitDir string // directory the worker command was run from
 func Worker(sockname string, mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	coordSockName = sockname
 	workerId = os.Getpid()
-	fmt.Printf("Worker %v started \n", workerId)
+	// fmt.Printf("Worker %v started \n", workerId)
 
 	if wd, err := os.Getwd(); err == nil {
 		workerInitDir = wd
@@ -51,9 +51,19 @@ func Worker(sockname string, mapf func(string, string) []KeyValue, reducef func(
 
 	var reply *RequestTaskReply
 	var ce error
-	for reply, ce = CallRequestTask(); reply.Task.ReadLocation != "" && ce == nil; reply, ce = CallRequestTask() {
-		fmt.Printf("WorkerId: %v | Begin processing task: %v of type: %v \n", workerId, reply.Task.ReadLocation, reply.Task.Type)
+	for reply, ce = CallRequestTask(); true; reply, ce = CallRequestTask() {
+		if ce != nil {
+			fmt.Printf("Worker: %v | Error occured requesting task: %v \n", workerId, ce)
+		} else if reply.Task.ReadLocation == "" {
+			// fmt.Printf("Worker: %v | No task available \n", workerId)
+		}
 
+		if ce != nil || reply.Task.ReadLocation == "" {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		// fmt.Printf("WorkerId: %v | Begin processing task: %v of type: %v \n", workerId, reply.Task.ReadLocation, reply.Task.Type)
 		intermediate := make([]KeyValue, 0)
 		var err error
 		if reply.Task.Type == "map" {
@@ -68,10 +78,6 @@ func Worker(sockname string, mapf func(string, string) []KeyValue, reducef func(
 			CallUpdateTaskStatus(reply.Task.Id, "completed", reply.Task.WriteLocation, reply.Task.AssignedWorkerId, intermediate, reply.Task.Retries)
 		}
 		time.Sleep(time.Second * 1)
-	}
-
-	if ce != nil {
-		log.Fatal(ce)
 	}
 }
 

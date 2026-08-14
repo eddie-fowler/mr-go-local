@@ -65,7 +65,7 @@ func (c *Coordinator) UpdateTaskStatus(args *UpdateTaskStatusArgs, reply *Update
 	defer c.Mutex.Unlock()
 
 	for i, t := range c.Tasks {
-		if (t.Id == args.TaskId){
+		if (t.Id == args.TaskId && t.AssignedWorkerId == args.AssignedWorkerId){
 			c.IntermediateResults = append(c.IntermediateResults, args.Intermediate...)
 
 			c.Tasks[i].Status = args.Status
@@ -109,7 +109,7 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 	cleanUp(&c)
 	initializeMapTasks(&c, files)
 	initializeCoordinator(&c, nReduce)
-	fmt.Printf("tasks %v \n", c.Tasks)
+	// fmt.Printf("tasks %v \n", c.Tasks)
 
 	c.server(sockname)
 	return &c
@@ -137,7 +137,7 @@ func setMainDir(coordinator *Coordinator){
 	dir = filepath.Join(dir, "../main")
 
 	coordinator.MainDir = dir
-	fmt.Printf("main dir %v \n", coordinator.MainDir)
+	// fmt.Printf("main dir %v \n", coordinator.MainDir)
 }
 
 func initializeMapTasks(coordinator *Coordinator, files []string){
@@ -174,7 +174,7 @@ func generateReduceTasksIfApplicable(coordinator *Coordinator) {
 	if !coordinator.IsReduceGenerated {
 		isAllMappingDone := true 
 		for _, t := range coordinator.Tasks {
-			if t.Type == "map" && t.Status != "completed" {
+			if t.Type == "map" && t.Status != "completed" && t.Status != "skipped" {
 				isAllMappingDone = false
 				break
 			}
@@ -183,7 +183,7 @@ func generateReduceTasksIfApplicable(coordinator *Coordinator) {
 			coordinator.IsReduceGenerated = true
 			
 			partitions := shuffle(coordinator)
-			fmt.Printf("partitions %v \n", len(partitions))
+			// fmt.Printf("partitions %v \n", len(partitions))
 			initializeReduceTasks(coordinator, partitions)
 			clear(coordinator.IntermediateResults)
 		}
@@ -235,7 +235,7 @@ func cleanUp(coordinator *Coordinator) {
 }
 
 func setSkippedIfApplicable(i int, tasks []Task){
-	if tasks[i].Status == "in progress" && tasks[i].Retries > 3 {
+	if tasks[i].Status == "in progress" && tasks[i].Retries > 10 {
 		tasks[i].AssignedWorkerId = -1
 		tasks[i].Status = "skipped"
 		tasks[i].LastUpdated = time.Now()
