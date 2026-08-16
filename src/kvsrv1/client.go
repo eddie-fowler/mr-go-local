@@ -1,9 +1,12 @@
 package kvsrv
 
 import (
-	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
-	"6.5840/tester1"
+	"fmt"
+	"time"
+
+	types "6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
+	tester "6.5840/tester1"
 )
 
 
@@ -28,9 +31,34 @@ func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 // The types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
-func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
+func (ck *Clerk) Get(key string) (string, types.Tversion, types.Err) {
 	// You will have to modify this function.
-	return "", 0, rpc.ErrNoKey
+	args := types.GetArgs{Key: key}
+	reply := types.GetReply{}
+
+	var value string
+	var version types.Tversion
+	var err types.Err
+
+	for true {
+		ck.clnt.Call(ck.server, "KVServer.Get", args, &reply)
+
+		if reply.Err == types.OK {
+			value = reply.Value
+			version = reply.Version
+			err = types.OK
+			break
+		} else if reply.Err == types.ErrNoKey {
+			err = types.ErrNoKey
+			break
+		} else {
+			fmt.Printf("Get failed for key: %v \n", key)
+		}
+
+		time.Sleep(time.Second * 1)
+	}
+
+	return 	value, version, err
 }
 
 // Put updates key with value only if the version in the
@@ -50,7 +78,10 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // The types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
-func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return rpc.ErrNoKey
+func (ck *Clerk) Put(key, value string, version types.Tversion) types.Err {
+	args := types.PutArgs{Key: key, Value: value, Version: version}
+	reply := types.PutReply{}
+	ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
+
+	return reply.Err
 }
