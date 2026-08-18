@@ -40,22 +40,20 @@ func (ck *Clerk) Get(key string) (string, types.Tversion, types.Err) {
 	var version types.Tversion
 	var err types.Err
 
-	for true {
-		ck.clnt.Call(ck.server, "KVServer.Get", args, &reply)
 
-		if reply.Err == types.OK {
+	for ok := ck.clnt.Call(ck.server, "KVServer.Get", args, &reply); !ok; ok = ck.clnt.Call(ck.server, "KVServer.Get", args, &reply) {
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	switch reply.Err {
+		case types.OK:
 			value = reply.Value
 			version = reply.Version
 			err = types.OK
-			break
-		} else if reply.Err == types.ErrNoKey {
+		case types.ErrNoKey:
 			err = types.ErrNoKey
-			break
-		} else {
+		default:
 			fmt.Printf("Get failed for key: %v \n", key)
-		}
-
-		time.Sleep(time.Second * 1)
 	}
 
 	return 	value, version, err
@@ -81,7 +79,18 @@ func (ck *Clerk) Get(key string) (string, types.Tversion, types.Err) {
 func (ck *Clerk) Put(key, value string, version types.Tversion) types.Err {
 	args := types.PutArgs{Key: key, Value: value, Version: version}
 	reply := types.PutReply{}
-	ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
+
+	isRetried := false
+	for ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply); !ok; ok = ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply){
+		isRetried = true
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	//We don't know if the initial request was executed since [response] may have been dropped.
+	//when a request is dropped we can more confidently retry since we know the server didn't execute 
+	if isRetried && reply.Err == types.ErrVersion {
+		reply.Err = types.ErrMaybe
+	}
 
 	return reply.Err
 }
