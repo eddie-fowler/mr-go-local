@@ -52,8 +52,9 @@ func MakeKVServer(sockname string) *KVServer {
 // exists. Otherwise, Get returns ErrNoKey.
 func (kv *KVServer) Get(args *types.GetArgs, reply *types.GetReply) {
 	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
 	existing, ok := kv.KeyValueItems[args.Key]
-	kv.mu.Unlock()
 
 	if !ok {
 		reply.Err = types.ErrNoKey

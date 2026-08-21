@@ -87,7 +87,7 @@ func (ck *Clerk) Put(key, value string, version types.Tversion) types.Err {
 	}
 
 	//We don't know if the initial request was executed since [response] may have been dropped.
-	//when a request is dropped we can more confidently retry since we know the server didn't execute 
+	//when a **request** is dropped we can more confidently retry since we know the server didn't execute 
 	if isRetried && reply.Err == types.ErrVersion {
 		reply.Err = types.ErrMaybe
 	}

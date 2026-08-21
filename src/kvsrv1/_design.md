@@ -22,4 +22,3 @@ State
        -  Value
        -  Version
        -  Queue chan
-    -  
