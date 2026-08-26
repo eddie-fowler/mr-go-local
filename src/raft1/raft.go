@@ -7,9 +7,25 @@ package raft
 // In addition,  Make() creates a new raft peer that implements the
 // raft interface.
 
+/*
+	Todo:
+	[x]		init all peers as followers
+	[x]		figure out what inital term value is| 0
+	[x]		figure out where inital term value should be set | Raft server struct (server maintains state periodically persists)
+	[x]		figure out how to trigger election (setting self to candidate) now - (lastHB) > some period
+	[x]		set followers -> candidates if election period lasped
+	[x]		track votedFor state
+	[ ]		handleVote
+	[ ]		handleElection
+	[x]		cast vote for self to all peer
+	[x]		handle already casted votes
+	[ ]		handle races
+*/
 
 import (
 	//	"bytes"
+
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -17,17 +33,31 @@ import (
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
-
 // A Go object implementing a single Raft peer.
-type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *tester.Persister   // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
+//Raft peers can act as all three states [leader, candidate, follower]
+type Mode int
+const (
+	Leader = iota
+	Candidate
+	Follower
+)
 
+type Log struct {
+	Command			string
+	TermReceived	int
+}
+type Raft struct {
+	mu        	sync.Mutex          // Lock to protect shared access to this peer's state
+	peers     	[]*labrpc.ClientEnd // RPC end points of all peers
+	persister 	*tester.Persister   // Object to hold this peer's persisted state
+	me        	int      			   // the peer's index into peers[]
+	Mode	  	Mode
+	CurrentTerm	int
+	LastHB		time.Time
+	VotedFor	int
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -103,19 +133,40 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
+//Create voter algorithm 3A. 
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	Term			int
+	CandidateId		int
+	LastLogIndex	int
+	LastLogTerm		int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	Term		int
+	VoteGranted	bool
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+
+	if args.Term < rf.CurrentTerm {
+		reply.VoteGranted = false
+		fmt.Printf("%v: Vote denied %v \n", rf.me, args.CandidateId)
+	}
+
+	if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
+		rf.VotedFor = args.CandidateId
+		reply.VoteGranted = true
+		fmt.Printf("%v: Vote granted %v \n", rf.me, args.CandidateId)
+	}
+
+	rf.mu.Unlock()
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -173,12 +224,33 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
+//3 states [follower, candidate, leader]
+//follower -> candidate [when no request received after a period of time]
+//candidate -> leader [when receives majority]
+//candidate -> follower [when leader elected]
+//leader -> crash [will lead to an election, but doesn't directly trigger it]
+//each election starts a new term
+//leader election triggered by heartbeat -> no responses following an [election timeout period] will trig election
+//TODO
+//Implement heartbeat monitor for followers -> leader 
+//Implement election timeout period
+//Implement election algo
+//** Self vote by followers 
+//** First come first serve canidacy
+//** election time period 
+//New leader is established by heartbeat response to all other candidates -> follower
+
 func (rf *Raft) ticker() {
 	for true {
-
 		// Your code here (3A)
 		// Check if a leader election should be started.
+		rf.mu.Lock()
+		elapsed := time.Since(rf.LastHB)
+		rf.mu.Unlock()
 
+		if elapsed > 3 * time.Second {
+			rf.handleVote()
+		}
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -196,9 +268,10 @@ func (rf *Raft) ticker() {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
+//all followers heartbeat 
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *tester.Persister, applyCh chan raftapi.ApplyMsg) raftapi.Raft {
-	rf := &Raft{}
+	rf := &Raft{Mode: Follower, CurrentTerm: 0, LastHB: time.Now(), VotedFor: -1}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
@@ -213,4 +286,38 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 
 	return rf
+}
+
+func (rf *Raft) handleVote(){
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.Mode = Candidate
+	rf.CurrentTerm += 1
+	args := RequestVoteArgs{Term: rf.CurrentTerm, CandidateId: rf.me}
+	reply := RequestVoteReply{}
+	rf.LastHB = time.Now()
+
+	votes := 0
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+
+		rf.sendRequestVote(i, &args, &reply)
+
+		if reply.VoteGranted {
+			votes += 1
+		}
+	}
+	fmt.Printf("%v| Vote count: %v \n", rf.me, votes)
+
+	minVotes := 1
+	if votes > minVotes {
+		rf.Mode = Leader
+		rf.VotedFor = rf.me
+		fmt.Printf("New Leader: %v \n", rf.me)
+	} else {
+		rf.Mode = Follower
+		fmt.Printf("New Follower: %v \n", rf.me)
+	}
 }
