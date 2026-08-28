@@ -183,9 +183,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Unlock()
 
 	if args.Term < currentTerm {
-		currentTerm = args.Term
 		reply.VoteGranted = false
-		reply.Term = args.Term
+		reply.Term = currentTerm
 		return
 	}
 
@@ -352,8 +351,9 @@ func (rf *Raft) isTimedOut(){
 	}
 
 	elapsed := time.Since(rf.LastUpdated)
-
-	if(elapsed > 3 * time.Second){
+	ms := 100 + rand.Intn(101)
+	timeout := 2*time.Second + time.Duration(ms)*time.Millisecond
+	if elapsed > timeout {
 		rf.Mode = Candidate
 	} else {
 		rf.Mode = Follower
@@ -410,6 +410,7 @@ func (rf *Raft) isElected(){
 			rf.CurrentTerm = r.Term
 			rf.Mode = Follower
 			rf.VotedFor = -1
+			return
 		} else if r.VoteGranted {
 			votes += 1
 		}
