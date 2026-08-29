@@ -67,14 +67,14 @@ const (
 
 
 type Raft struct {
-	me        	int      			   // the peer's index into peers[]
-	mu        	sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     	[]*labrpc.ClientEnd // RPC end points of all peers
-	persister 	*tester.Persister   // Object to hold this peer's persisted state
-	Mode	  	Mode
-	CurrentTerm	int
-	VotedFor	int
-	LastUpdated	time.Time
+	me        			int      			   // the peer's index into peers[]
+	mu        			sync.Mutex          // Lock to protect shared access to this peer's state
+	peers     			[]*labrpc.ClientEnd // RPC end points of all peers
+	persister 			*tester.Persister   // Object to hold this peer's persisted state
+	Mode	  			Mode
+	CurrentTerm			int
+	VotedFor			int
+	ElectionTimeout		time.Time
 	electionInProgress	bool
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
@@ -177,28 +177,41 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
+	me := rf.me
 	currentTerm := rf.CurrentTerm
 	votedFor := rf.VotedFor
 	// fmt.Printf("me: %v, currentTerm: %v, electionTerm: %v, votedFor: %v \n", rf.me, currentTerm, args.Term, votedFor)
 	rf.mu.Unlock()
 
+	fmt.Printf("args: %v, currentTerm: %v \n", args.Term, currentTerm)
 	if args.Term < currentTerm {
 		reply.VoteGranted = false
 		reply.Term = currentTerm
 		return
+	} else if args.Term > currentTerm {
+		rf.mu.Lock()
+		rf.VotedFor = -1
+		votedFor = -1
+
+		rf.CurrentTerm = args.Term
+		currentTerm = args.Term
+
+		rf.Mode = Follower
+		rf.mu.Unlock()
 	}
 
+	fmt.Printf("me: %v| votedFor: %v | candidateId: %v \n", me, votedFor, args.CandidateId)
 	if (votedFor == -1 || votedFor == args.CandidateId) {
 		rf.mu.Lock()
 		rf.VotedFor = args.CandidateId
+		rf.ElectionTimeout = generateElectionTimeout()
 		rf.mu.Unlock()
 
 		reply.VoteGranted = true
 	} else {
 		reply.VoteGranted = false
 	}
-
-	reply.Term = max(args.Term, currentTerm)
+	reply.Term = currentTerm
 }
 
 type AppendLogRequest struct{
@@ -219,8 +232,9 @@ func (rf *Raft) AppendLogEntry(args *AppendLogRequest, reply *AppendLogResponse)
 		rf.VotedFor = -1
 	}
 	
-	rf.LastUpdated = time.Now()
-	fmt.Printf("Handled ping {me:%v, mode:%v} \n", rf.me, rf.Mode)
+	reply.Term = rf.CurrentTerm
+	rf.ElectionTimeout = generateElectionTimeout()
+	// fmt.Printf("Handled ping {me:%v, mode:%v} \n", rf.me, rf.Mode)
 	// fmt.Printf("me: %v is alive {mode: %v, votedFor: %v, currentTerm: %v}\n", rf.me, rf.Mode, rf.VotedFor, rf.CurrentTerm)
 }
 
@@ -301,16 +315,13 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		rf.mu.Lock()
-		fmt.Printf("ticking... {me: %v, mode: %v}\n", rf.me, rf.Mode)
-		rf.mu.Unlock()
-
+		
 		rf.isTimedOut()
 		rf.isElected()
 		rf.isLeading()
 
-		ms := (rand.Int63() % 231)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		time.Sleep(time.Duration(125) * time.Millisecond)
+
 	}
 }
 
@@ -326,7 +337,7 @@ func (rf *Raft) ticker() {
 //all followers heartbeat 
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *tester.Persister, applyCh chan raftapi.ApplyMsg) raftapi.Raft {
-	rf := &Raft{Mode: Follower, CurrentTerm: 0, VotedFor:  -1, LastUpdated: time.Now()}
+	rf := &Raft{Mode: Follower, CurrentTerm: 0, VotedFor:  -1, ElectionTimeout: generateElectionTimeout()}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
@@ -350,13 +361,8 @@ func (rf *Raft) isTimedOut(){
 		return
 	}
 
-	elapsed := time.Since(rf.LastUpdated)
-	ms := 100 + rand.Intn(101)
-	timeout := 2*time.Second + time.Duration(ms)*time.Millisecond
-	if elapsed > timeout {
+	if time.Now().After(rf.ElectionTimeout) {
 		rf.Mode = Candidate
-	} else {
-		rf.Mode = Follower
 	}
 }
 
@@ -376,55 +382,56 @@ func (rf *Raft) isElected(){
 	peers := rf.peers
 	rf.mu.Unlock()
 
-	var wg sync.WaitGroup
-	replies := make([]RequestVoteReply, len(peers))
+	go func () {
+		time.Sleep(time.Until(generateElectionTimeout()))
+		rf.mu.Lock()
+		rf.electionInProgress = false
+		rf.mu.Unlock()
+	}()
+
+	fmt.Printf("me: %v commencing vote term: %v -------------------------------------\n", me, currentTerm)
+	votes := 1
 	for i := range peers {
 		if i == me {
 			continue
 		}
 
-		wg.Add(1)
 		go func(i int){
-			defer wg.Done()
-
 			args := RequestVoteArgs{Term: currentTerm, CandidateId: me}
 			reply := RequestVoteReply{}
-			peers[i].Call("Raft.RequestVote", args, &reply)
+			ok := peers[i].Call("Raft.RequestVote", args, &reply)
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if(rf.Mode != Candidate){
+				rf.electionInProgress = false
+				return
+			}
+			fmt.Printf("me: %v to peer: %v - ok: %v, vote: %v \n", me, i, ok, reply.VoteGranted)
 
-			replies[i] = reply
+			//Anytime we findout a node has a term ahead of ours we become followers
+			if reply.Term > rf.CurrentTerm {
+				rf.CurrentTerm = reply.Term
+				rf.Mode = Follower
+				rf.VotedFor = -1
+				rf.ElectionTimeout = generateElectionTimeout()
+				rf.electionInProgress = false
+
+				return
+			} else {
+				if reply.VoteGranted {
+					votes += 1
+				}
+
+				mid := (len(rf.peers)/2) + 1
+				if votes >= mid {
+					rf.Mode = Leader
+					rf.electionInProgress = false
+
+					fmt.Printf("Election won me:%v term: %v \n", me, rf.CurrentTerm)
+				}
+			}
 		}(i)
 	}
-	wg.Wait()
-	
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	if(rf.Mode != Candidate){
-		return
-	}
-
-	votes := 1
-	//Anytime we findout a node has a term ahead of ours we become followers
-	for _, r := range replies {
-		if r.Term > rf.CurrentTerm {
-			rf.CurrentTerm = r.Term
-			rf.Mode = Follower
-			rf.VotedFor = -1
-			return
-		} else if r.VoteGranted {
-			votes += 1
-		}
-	}
-
-	mid := (len(rf.peers)/2) + 1
-	if votes >= mid {
-		rf.Mode = Leader
-	} else {
-		rf.Mode = Follower
-	}
-	rf.VotedFor = -1
-	rf.electionInProgress = false
-	fmt.Printf("Election complete me:%v is %v \n", rf.me, rf.Mode)
 }
 
 func (rf *Raft) isLeading(){
@@ -439,31 +446,33 @@ func (rf *Raft) isLeading(){
 		return
 	}
 
-	var wg sync.WaitGroup
-	replies := make([]AppendLogResponse, len(peers))
 	for i := range peers {
 		if i == me {
 			continue
 		}
 
-		wg.Add(1)
-		go func(i int, wg *sync.WaitGroup){
-			defer wg.Done()
-		fmt.Printf("me: %v, ping:%v \n", rf.me, i)
+		go func(i int){
+		// fmt.Printf("me: %v, ping:%v \n", rf.me, i)
 			args := AppendLogRequest{Term: currentTerm}
 			reply := AppendLogResponse{}
-			peers[i].Call("Raft.AppendLogEntry", args, &reply)
-			
-			replies[i] = reply
-		}(i, &wg)
+			//how do we know if we're disconnected
+			ok := peers[i].Call("Raft.AppendLogEntry", args, &reply)
+			if ok {
+				rf.mu.Lock()
+				if reply.Term > rf.CurrentTerm {
+					rf.Mode = Follower
+					rf.CurrentTerm = reply.Term
+					rf.VotedFor = -1
+					rf.ElectionTimeout = generateElectionTimeout()
+				}
+				rf.mu.Unlock()
+			}
+		}(i)
 	}
-	wg.Wait()
-	//Anytime we findout a node has a term ahead of ours we become followers
-	for _, r := range replies {
-		if r.Term > rf.CurrentTerm {
-			rf.CurrentTerm = r.Term
-			rf.Mode = Follower
-			rf.VotedFor = -1
-		}
-	}
+}
+
+
+func generateElectionTimeout() time.Time {
+	ms := 325 + rand.Intn(150)
+	return time.Now().Add(time.Duration(ms) * time.Millisecond)
 }
