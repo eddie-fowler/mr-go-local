@@ -695,9 +695,9 @@ func (rf *Raft) isQuorumReached() (bool, int) {
 			matchCount++
 		}
 	}
-	mid := (len(rf.logs)/2) + 1
+	mid := (len(rf.peers)/2) + 1
 
-	return mid == matchCount, len(rf.logs) - 1
+	return mid >= matchCount, len(rf.logs) - 1
 }
 
 func (rf *Raft) isMajority(n int) bool {
