@@ -239,6 +239,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.mu.Unlock()
 	}
 
+
 	if ((votedFor == -1 || votedFor == args.CandidateId) && 
 		(args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex))) {
 		rf.mu.Lock()
@@ -263,48 +264,66 @@ type AppendLogRequest struct{
 	LeaderCommit	int
 }
 type AppendLogResponse struct{
-	Term 	int
-	Success bool
+	Term 			int
+	Success 		bool
+	ConflictIndex	int
 }
 
 func (rf *Raft) AppendLogEntry(args *AppendLogRequest, reply *AppendLogResponse){
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("me:%v, logs:%v, currentTerm: %v, argTerm:%v, prevLogIndex:%v \n", rf.me, rf.logs, args.Term, rf.CurrentTerm, args.PrevLogIndex)
+
 	currentTerm := rf.CurrentTerm
 
 	if args.Term >= currentTerm {
 		rf.setToFollower(args.Term)
+		reply.Term = currentTerm
 	} else {
 		reply.Success = false
 		reply.Term = currentTerm
 		return
 	}
 
+	var prevLog LogEntry
+	var isMatchingTerms bool
 	maxLogIndex := len(rf.logs) - 1
-	if -1 < args.PrevLogIndex && args.PrevLogIndex <= maxLogIndex && len(args.Entries) > 0 {
-		prevLog := rf.logs[args.PrevLogIndex]
-		fmt.Printf("me:%v, prevLog:%v, prevTerm:%v \n", rf.me, prevLog, args.PrevLogTerm)
-		if prevLog.Term != args.PrevLogTerm {
+
+	if -1 < args.PrevLogIndex && args.PrevLogIndex <= maxLogIndex {
+		prevLog = rf.logs[args.PrevLogIndex]
+		isMatchingTerms = prevLog.Term == args.PrevLogTerm
+	}
+
+	if len(args.Entries) > 0 {
+		//leader prev log and follower prev log should have matching terms 
+		// leader logs ahead of follower logs...how? 
+		// partitioned leader still receiving commands has a log past networked leaders
+		// partitioned leader reconnects and becomes follower, now their logs are beyond what consensus shows	
+		if args.PrevLogIndex > maxLogIndex {
+			reply.ConflictIndex = rf.resolveIndexConflict(args.PrevLogTerm)
+			fmt.Printf("me:%v, Resolved Conflict A: %v \n", rf.me, reply.ConflictIndex)
+			reply.Success = false
+			return
+		}
+
+		if !isMatchingTerms {
+			reply.ConflictIndex = rf.resolveIndexConflict(args.PrevLogTerm)
+			fmt.Printf("me:%v, Resolved Conflict B: %v \n", rf.me, reply.ConflictIndex)
 			reply.Success = false
 			return
 		}
 
 		rf.logs = append(rf.logs[:args.PrevLogIndex+1], args.Entries...)
 		reply.Success = true
-		fmt.Printf("Replicated logs me:%v, logs:%v \n", rf.me, rf.logs)
-	}
-
-	if maxLogIndex == args.LeaderCommit && args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = args.LeaderCommit
+		fmt.Printf("Replicated logs me:%v, logs:%v entries:%v \n", rf.me, rf.logs, args.Entries)
+	} else if isMatchingTerms && args.LeaderCommit > rf.commitIndex  {
+		fmt.Printf("Committing me:%v, leaderCommit:%v, maxLogIndex:%v \n", rf.me, args.LeaderCommit, maxLogIndex)
+		rf.commitIndex = min(args.LeaderCommit, maxLogIndex)
 		rf.mu.Unlock()
 
 		rf.commitChan <- CommitEntry{}
 
 		rf.mu.Lock()
 	}
-
-	reply.Term = currentTerm
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -360,7 +379,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	me := rf.me
 	rf.mu.Unlock()
 
-	//how to handle same request multiple times? 
 	if isLeader {
 		rf.mu.Lock()
 		le := LogEntry{Term: currentTerm, Command: command}
@@ -375,9 +393,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) ticker() {
 	for true {
 		// Your code here (3A)
-		// Check if a leader election should be started.
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
 		rf.isTimedOut()
 		rf.isElected()
 		rf.isLeading()
@@ -400,8 +415,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	persister *tester.Persister, applyCh chan raftapi.ApplyMsg) raftapi.Raft {
 	rf := &Raft{Mode: Follower, CurrentTerm: 0, VotedFor:  -1, ElectionTimeout: generateElectionTimeout(), commitIndex: 0, appliedIndex: 0, electionInProgress: false}
 	rf.logs = make([]LogEntry, 0)
-	rf.commitChan = make(chan CommitEntry)
 	rf.logs = append(rf.logs, LogEntry{Term: 0, Command: nil})
+	rf.commitChan = make(chan CommitEntry)
 	rf.applyChan = applyCh
 	rf.peers = peers
 	rf.persister = persister
@@ -533,15 +548,13 @@ func (rf *Raft) isLeading(){
 		rf.mu.Unlock()
 
 		go func(i int){
-			args := AppendLogRequest{}
-
 			rf.mu.Lock()
-			isAppendRequest := lastLogIndex >= pNextIndex
-			if isAppendRequest {
-				args = rf.buildAppendLogArgs(pNextIndex)
-			} else {
-				args = rf.buildHeartbeatArgs()
+			isEntriesIncluded := lastLogIndex >= pNextIndex
+			entries := make([]LogEntry, 0)
+			if isEntriesIncluded {
+				entries = rf.logs[pNextIndex:]
 			}
+			args := rf.buildAppendLogArgs(pNextIndex, entries)
 			rf.mu.Unlock()
 
 			reply := AppendLogResponse{}
@@ -557,28 +570,24 @@ func (rf *Raft) isLeading(){
 			
 			mode = rf.Mode
 			
-			fmt.Printf("ok:%v, currentTerm:%v, replyTerm:%v, leader:%v\n", ok, currentTerm, reply.Term, mode)
-			if ok && isAppendRequest && currentTerm == reply.Term && mode == Leader {
+			if ok && isEntriesIncluded && currentTerm == reply.Term && mode == Leader {
 				if reply.Success {
 					rf.pNextIndex[i] = pNextIndex + len(args.Entries)
-					rf.pMatchIndex[i] = len(rf.logs)  - 1
+					rf.pMatchIndex[i] = len(rf.logs) - 1
 
-					if qr, cmi := rf.isQuorumReached(); qr {
-						fmt.Printf("Quorum reached me:%v, commitIndex:%v, logs:%v, entries:%v \n", me, cmi, rf.logs, args.Entries)
-						rf.commitIndex = cmi
+					if rf.isQuorumReached() {
+						rf.commitIndex = len(rf.logs) - 1
+						fmt.Printf("Quorum reached me:%v, commitIndex:%v, logs:%v, entries:%v \n", me, rf.commitIndex, rf.logs, args.Entries)
 
 						rf.mu.Unlock()
 						rf.commitChan <- CommitEntry{}
 						rf.mu.Lock()
 					}
 				} else {
-					rf.pNextIndex[i] = pNextIndex - 1
-					fmt.Printf("Mismatch indexes decrement follower:%v, pNextIndex:%v \n", i, rf.pNextIndex[i])
+					rf.pNextIndex[i] = reply.ConflictIndex + 1
+					fmt.Printf("Mismatch indexes follower:%v, resolveConflictIndex:%v, pNextIndex:%v \n", i, reply.ConflictIndex, rf.pNextIndex[i])
 				}
-			} 
-			// if !ok {
-			// 	fmt.Printf("Failed to ping follower:%v, pNext:%v \n", i, pNextIndex)
-			// }
+			}
 			rf.mu.Unlock()
 		}(i)
 	}
@@ -598,20 +607,7 @@ func (rf *Raft) getLastLogIndexAndTerm() (int, int) {
   }
 }
 
-func (rf *Raft) buildHeartbeatArgs() AppendLogRequest {
-	args := AppendLogRequest{
-		Term:          rf.CurrentTerm,
-		LeaderId:      rf.me,
-		PrevLogIndex:  -1,
-		PrevLogTerm:   -1,
-		Entries:       []LogEntry{},
-		LeaderCommit:  rf.commitIndex,
-	}
-	return args
-}
-
-func (rf *Raft) buildAppendLogArgs(pIndex int) AppendLogRequest {
-	entries := rf.logs[pIndex:]
+func (rf *Raft) buildAppendLogArgs(pIndex int, entries []LogEntry) AppendLogRequest {
 	prevLogIndex := pIndex - 1
 	prevLogTerm := rf.logs[prevLogIndex].Term
 	args := AppendLogRequest{
@@ -644,20 +640,20 @@ func (rf *Raft) setToLeader() {
 	}
 }
 
-func (rf *Raft) isQuorumReached() (bool, int) {
+func (rf *Raft) isQuorumReached() bool {
 	matchCount := 1
 	for p := range rf.peers {
 		if p == rf.me {
 			continue
 		}
 
-		if rf.pMatchIndex[p] == len(rf.logs)-1{
+		if rf.pMatchIndex[p] == len(rf.logs)-1 { 
 			matchCount++
 		}
 	}
 
 	min := (len(rf.peers)/2) + 1
-	return matchCount == min, len(rf.logs) - 1
+	return matchCount == min
 }
 
 func (rf *Raft) isMajority(n int) bool {
@@ -673,18 +669,32 @@ func (rf *Raft) handleCommits(){
 		var entries []LogEntry
 		if rf.commitIndex > rf.appliedIndex {
 			entries = rf.logs[rf.appliedIndex+1 : rf.commitIndex+1]
-			rf.appliedIndex = rf.commitIndex
+			rf.appliedIndex = rf.appliedIndex + len(entries)
 		}
 
 		for i, entry := range entries {
 			msg := raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: appliedIndexSS+i+1}
-			fmt.Printf("Applied me:%v, command:%v, ci:%v \n", rf.me, entry.Command, appliedIndexSS+i+1)
 			rf.mu.Unlock()
 
 			rf.applyChan <- msg
+			fmt.Printf("Applied me:%v, command:%v, ci:%v \n", rf.me, entry.Command, appliedIndexSS+i+1)
 
 			rf.mu.Lock()
 		}
 		rf.mu.Unlock()
 	}
+}
+
+func (rf *Raft) resolveIndexConflict(prevLogTerm int) int {
+	resolveIndex := 0
+	lastLogIndex := len(rf.logs) - 1
+
+	for i := lastLogIndex; -1 < i; i-- {
+		if rf.logs[i].Term == prevLogTerm {
+			resolveIndex = i
+			break
+		}
+	}
+
+	return resolveIndex
 }
